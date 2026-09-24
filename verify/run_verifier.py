@@ -5,6 +5,8 @@
 2. 构建检查（compileall）；
 3. 等待审计服务健康（请求校验器与扫描引擎均就绪）；
 4. API/HTTP 冒烟：
+   - 高密度重复框同竖线交接：面积 200、周长 70；
+   - 同竖线部分重叠 / 完全相接 / 不相交交接：周长 70 / 60 / 80；
    - 重叠框：面积 10、周长 14；
    - 相邻方框：不计公共边（面积 12、周长 14）；
    - 几何重复框：不增量（面积 6、周长 10）；
@@ -101,6 +103,59 @@ def _post(records):
 def run_http_smoke() -> bool:
     print("== 4/4 API/HTTP 冒烟 ==", flush=True)
     ok = True
+
+    # 高密度缺陷构型：两簇各 8 个几何重复框在同一条竖线 x=10 交接，
+    # 只共一段边；面积 200、周长 70（内部共边 5 不计，上下外露竖边不丢）。
+    dense = [
+        {"id": f"L{i}", "x1": 0, "y1": 0, "x2": 10, "y2": 10}
+        for i in range(8)
+    ]
+    dense += [
+        {"id": f"R{i}", "x1": 10, "y1": 5, "x2": 20, "y2": 15}
+        for i in range(8)
+    ]
+    status, payload = _post(dense)
+    want = {"area": "200", "perimeter": "70"}
+    if status == 200 and payload == want:
+        _ok("高密度重复框同竖线交接", f"{payload} == {want}")
+    else:
+        _fail("高密度重复框 面积200/周长70", f"status={status} payload={payload}")
+        ok = False
+
+    # 同一横坐标的三种交接边界：部分重叠 70、完全相接 60、仅角点 80。
+    junction_cases = [
+        (
+            "部分重叠",
+            [
+                {"id": "a", "x1": 0, "y1": 0, "x2": 10, "y2": 10},
+                {"id": "b", "x1": 10, "y1": 5, "x2": 20, "y2": 15},
+            ],
+            {"area": "200", "perimeter": "70"},
+        ),
+        (
+            "完全相接",
+            [
+                {"id": "a", "x1": 0, "y1": 0, "x2": 10, "y2": 10},
+                {"id": "b", "x1": 10, "y1": 0, "x2": 20, "y2": 10},
+            ],
+            {"area": "200", "perimeter": "60"},
+        ),
+        (
+            "不相交交接",
+            [
+                {"id": "a", "x1": 0, "y1": 0, "x2": 10, "y2": 10},
+                {"id": "b", "x1": 10, "y1": 10, "x2": 20, "y2": 20},
+            ],
+            {"area": "200", "perimeter": "80"},
+        ),
+    ]
+    for label, records, want in junction_cases:
+        status, payload = _post(records)
+        if status == 200 and payload == want:
+            _ok(f"同竖线{label}", f"{payload} == {want}")
+        else:
+            _fail(f"同竖线{label}", f"status={status} payload={payload} want={want}")
+            ok = False
 
     # 验收构型：重叠框面积 10、周长 14。
     status, payload = _post(

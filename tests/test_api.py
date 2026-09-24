@@ -56,6 +56,51 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(payload, {"area": "10", "perimeter": "14"})
 
+    def test_high_density_duplicate_clusters_area200_perimeter70(self):
+        # 两簇各 8 个几何重复框在同一条竖线 x=10 交接：面积 200、周长 70。
+        records = [
+            {"id": f"L{i}", "x1": 0, "y1": 0, "x2": 10, "y2": 10}
+            for i in range(8)
+        ]
+        records += [
+            {"id": f"R{i}", "x1": 10, "y1": 5, "x2": 20, "y2": 15}
+            for i in range(8)
+        ]
+        status, payload = self._request("POST", "/api/audit", records)
+        self.assertEqual(status, 200)
+        self.assertEqual(payload, {"area": "200", "perimeter": "70"})
+
+    def test_same_x_junction_variants(self):
+        # 同一横坐标：部分重叠（70）、完全相接（60）、不相交交接（80）。
+        cases = [
+            (
+                [
+                    {"id": "a", "x1": 0, "y1": 0, "x2": 10, "y2": 10},
+                    {"id": "b", "x1": 10, "y1": 5, "x2": 20, "y2": 15},
+                ],
+                {"area": "200", "perimeter": "70"},
+            ),
+            (
+                [
+                    {"id": "a", "x1": 0, "y1": 0, "x2": 10, "y2": 10},
+                    {"id": "b", "x1": 10, "y1": 0, "x2": 20, "y2": 10},
+                ],
+                {"area": "200", "perimeter": "60"},
+            ),
+            (
+                [
+                    {"id": "a", "x1": 0, "y1": 0, "x2": 10, "y2": 10},
+                    {"id": "b", "x1": 10, "y1": 10, "x2": 20, "y2": 20},
+                ],
+                {"area": "200", "perimeter": "80"},
+            ),
+        ]
+        for records, want in cases:
+            with self.subTest(want=want):
+                status, payload = self._request("POST", "/api/audit", records)
+                self.assertEqual(status, 200)
+                self.assertEqual(payload, want)
+
     def test_adjacent_and_geometric_duplicate(self):
         status, payload = self._request(
             "POST",

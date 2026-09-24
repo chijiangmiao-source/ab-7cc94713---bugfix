@@ -11,8 +11,10 @@
 * pieces —— 覆盖区间内的连续覆盖段数；
 * lc/rc  —— 该节点 y 区间左右端点是否被覆盖（用于跨子节点合并段数）。
 
-横坐标相同的进入/离开事件先整体落库，再统一读取根节点状态，因此两矩形
-共边（甚至多重叠压）时该竖直线上的净变化恒为 0，不产生内部周长。
+同一横坐标的进入/离开事件先分别取同向边并集，再在整组应用*前*的
+树上裁决进入边、整组应用*后*的树上裁决离开边：两矩形共边（甚至多
+重叠压）时各自外侧都有覆盖，计 0；而同竖线只共一段边的"换班"交接，
+两端外露竖边分别落在两次查询里，不会被根节点的净变化（恒为 0）吞掉。
 
 面积 = Σ 覆盖总长 × 板宽（宽 = 相邻事件横坐标之差）。
 
@@ -124,12 +126,37 @@ class CoverageTree:
     def covered_pieces(self) -> int:
         return self.nodes[1].pieces
 
-    def apply_batch(self, changes: tuple[tuple[int, int, int], ...]) -> int:
-        """应用同一横坐标的净变化，并返回聚合后的边界变化量。"""
-        before = self.covered_length
+    def covered_length_in(self, lo: int, hi: int) -> int:
+        """压缩索引区间 [lo, hi) 内覆盖次数大于 0 的物理 y 长度。"""
+        if lo >= hi:
+            return 0
+        return self._query(1, 0, self.span, lo, hi)
+
+    def _query(self, p: int, l: int, r: int, ql: int, qr: int) -> int:
+        node = self.nodes[p]
+        if ql <= l and r <= qr:
+            return node.length
+        if node.cover > 0:
+            # 整段被本层懒标记覆盖：直接返回与查询区间重叠的物理长度。
+            lo = max(l, ql)
+            hi = min(r, qr)
+            return self.ys[hi] - self.ys[lo] if lo < hi else 0
+        mid = (l + r) >> 1
+        total = 0
+        if ql < mid:
+            total += self._query(p << 1, l, mid, ql, qr)
+        if qr > mid:
+            total += self._query(p << 1 | 1, mid, r, ql, qr)
+        return total
+
+    def apply_batch(self, changes: tuple[tuple[int, int, int], ...]) -> None:
+        """落库同一横坐标的净覆盖变化（进入 +1 / 离开 -1）。"""
         for lo, hi, delta in changes:
             self.add(lo, hi, delta)
-        return abs(self.covered_length - before)
+
+    def exposed_length(self, lo: int, hi: int) -> int:
+        """边区间 [lo, hi) 上覆盖度为 0 的物理长度——即该侧外露竖边长。"""
+        return (self.ys[hi] - self.ys[lo]) - self.covered_length_in(lo, hi)
 
 def _merge_intervals(intervals: list[tuple[int, int]]) -> list[tuple[int, int]]:
     """同一竖直线上同向边的并集（几何重复框只形成一条边界）。"""
@@ -151,28 +178,44 @@ def _merge_intervals(intervals: list[tuple[int, int]]) -> list[tuple[int, int]]:
 class _EventGroup:
     x: int
     changes: tuple[tuple[int, int, int], ...]
+    entering: tuple[tuple[int, int], ...]
+    leaving: tuple[tuple[int, int], ...]
 
 
 def _group_events(
     events: list[tuple[int, int, int, int]], index: dict[int, int]
 ) -> list[_EventGroup]:
-    """把同一横坐标的重复扫描事件合并为覆盖计数变化。"""
+    """把同一横坐标的扫描事件聚合为净变化与同向边并集。
+
+    * ``changes``   —— 每个 y 区间上的净覆盖增减（几何重复框的同向
+      事件先在此抵消，避免计数虚高）；
+    * ``entering``/``leaving`` —— 该横坐标全部矩形左边/右边各自 y 区间
+      的并集：几何重复框的重边只并成一条，而"既进又出"的混合交接
+      （如部分重叠的两簇框在同一条竖线上换班）两边都保留，分别交给
+      组前/组后的树裁决，任何一段外露竖边都不会被净变化吞掉。
+    """
     groups: list[_EventGroup] = []
     i = 0
     while i < len(events):
         x = events[i][0]
         net: dict[tuple[int, int], int] = {}
+        enter: list[tuple[int, int]] = []
+        leave: list[tuple[int, int]] = []
         while i < len(events) and events[i][0] == x:
             _, delta, y1, y2 = events[i]
             key = (index[y1], index[y2])
             net[key] = net.get(key, 0) + delta
+            (enter if delta > 0 else leave).append(key)
             i += 1
         changes = tuple(
             (lo, hi, delta)
             for (lo, hi), delta in sorted(net.items())
             if delta
         )
-        groups.append(_EventGroup(x, changes))
+        groups.append(
+            _EventGroup(x, changes, tuple(_merge_intervals(enter)),
+                        tuple(_merge_intervals(leave)))
+        )
     return groups
 
 
@@ -208,7 +251,18 @@ def _sweep(rects: list[Rect]) -> tuple[int, int]:
             area += tree.covered_length * width
             perimeter += 2 * tree.covered_pieces * width
 
-        perimeter += tree.apply_batch(group.changes)
+        # 竖直边：逐条边判其外侧紧邻半平面的覆盖度。进入边（矩形左边）
+        # 的外侧是左侧板，即整组应用*之前*的树；离开边（矩形右边）的
+        # 外侧是右侧板，即整组应用*之后*的树。取边 y 区间内外侧覆盖度
+        # 为 0 的长度。同竖线"既进又出"的混合交接由此分别裁决：重合段
+        # 外侧都有框（计 0），换班两端各自外露的竖边一段都不会丢。
+        for lo, hi in group.entering:
+            perimeter += tree.exposed_length(lo, hi)
+
+        tree.apply_batch(group.changes)
+
+        for lo, hi in group.leaving:
+            perimeter += tree.exposed_length(lo, hi)
 
         prev_x = x
     return area, perimeter
