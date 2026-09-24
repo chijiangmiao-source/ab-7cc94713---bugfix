@@ -77,6 +77,18 @@ class ApiTest(unittest.TestCase):
         )
         self.assertEqual((status, payload), (200, {"area": "6", "perimeter": "10"}))
 
+    def test_high_density_partial_junction_area200_perimeter70(self):
+        # 两簇各 8 个几何重复框，在 x=10 仅部分共边：外露竖边不得丢失。
+        records = [
+            {"id": f"a{k}", "x1": 0, "y1": 0, "x2": 10, "y2": 10}
+            for k in range(8)
+        ] + [
+            {"id": f"b{k}", "x1": 10, "y1": 5, "x2": 20, "y2": 15}
+            for k in range(8)
+        ]
+        status, payload = self._request("POST", "/api/audit", records)
+        self.assertEqual((status, payload), (200, {"area": "200", "perimeter": "70"}))
+
     def test_duplicate_id_rejected_with_location(self):
         status, payload = self._request(
             "POST",

@@ -124,12 +124,36 @@ class CoverageTree:
     def covered_pieces(self) -> int:
         return self.nodes[1].pieces
 
-    def apply_batch(self, changes: tuple[tuple[int, int, int], ...]) -> int:
-        """应用同一横坐标的净变化，并返回聚合后的边界变化量。"""
-        before = self.covered_length
+    def uncovered_length(self, lo: int, hi: int) -> int:
+        """查询压缩索引区间 [lo, hi) 内当前覆盖度为 0 的 y 长度。
+
+        用于在事件组应用前/后判定某条竖边各部分的"外侧"是否被覆盖。
+        """
+        if lo >= hi:
+            return 0
+        return self._uncovered(1, 0, self.span, lo, hi)
+
+    def _uncovered(self, p: int, l: int, r: int, ql: int, qr: int) -> int:
+        node = self.nodes[p]
+        if node.cover > 0:
+            # 整段（含与查询的交集）都在覆盖中。
+            return 0
+        if ql <= l and r <= qr:
+            return (self.ys[r] - self.ys[l]) - node.length
+        if r - l == 1:
+            return 0
+        mid = (l + r) >> 1
+        total = 0
+        if ql < mid:
+            total += self._uncovered(p << 1, l, mid, ql, qr)
+        if qr > mid:
+            total += self._uncovered(p << 1 | 1, mid, r, ql, qr)
+        return total
+
+    def apply_batch(self, changes: tuple[tuple[int, int, int], ...]) -> None:
+        """落库同一横坐标的全部净覆盖变化（覆盖计数永不为负）。"""
         for lo, hi, delta in changes:
             self.add(lo, hi, delta)
-        return abs(self.covered_length - before)
 
 def _merge_intervals(intervals: list[tuple[int, int]]) -> list[tuple[int, int]]:
     """同一竖直线上同向边的并集（几何重复框只形成一条边界）。"""
@@ -150,38 +174,61 @@ def _merge_intervals(intervals: list[tuple[int, int]]) -> list[tuple[int, int]]:
 @dataclass(frozen=True)
 class _EventGroup:
     x: int
+    # 进入边（矩形左边）与离开边（矩形右边）各自的 y 区间（已压缩为索引）。
+    entering: tuple[tuple[int, int], ...]
+    leaving: tuple[tuple[int, int], ...]
+    # 落库用的净覆盖变化（同一区间 +1/-1 可抵消）。
     changes: tuple[tuple[int, int, int], ...]
 
 
 def _group_events(
     events: list[tuple[int, int, int, int]], index: dict[int, int]
 ) -> list[_EventGroup]:
-    """把同一横坐标的重复扫描事件合并为覆盖计数变化。"""
+    """按横坐标归并事件。
+
+    进入边与离开边分开收集（计量外露竖边时要查事件组的不同侧）；
+    落库变化按区间求净值，使几何重复框只形成一次覆盖增减。
+    """
     groups: list[_EventGroup] = []
     i = 0
     while i < len(events):
         x = events[i][0]
+        entering: list[tuple[int, int]] = []
+        leaving: list[tuple[int, int]] = []
         net: dict[tuple[int, int], int] = {}
         while i < len(events) and events[i][0] == x:
             _, delta, y1, y2 = events[i]
             key = (index[y1], index[y2])
             net[key] = net.get(key, 0) + delta
+            (entering if delta > 0 else leaving).append(key)
             i += 1
         changes = tuple(
             (lo, hi, delta)
             for (lo, hi), delta in sorted(net.items())
             if delta
         )
-        groups.append(_EventGroup(x, changes))
+        groups.append(
+            _EventGroup(x, tuple(entering), tuple(leaving), changes)
+        )
     return groups
 
 
 def _sweep(rects: list[Rect]) -> tuple[int, int]:
     """沿 x 扫描，同步返回 (并集面积, 外露周长)。
 
-    每个事件横坐标上：先在"组前"树上为全部进入边（取并集）计量外侧
-    未覆盖长度，整组事件落库后再在"组后"树上为全部离开边（取并集）
-    计量；面积与水平边则用相邻事件横坐标之间的板宽计算。
+    每个事件横坐标上：
+
+    * 面积与水平边用相邻事件横坐标之间的板宽计算（板内覆盖集恒定，
+      每个连续段上下各一条外露水平边，累加 ``2 × pieces × 板宽``）；
+    * 竖边逐条判其**外侧紧邻半平面**的覆盖度：进入边（矩形左边）用整组
+      事件应用*之前*的树，离开边（矩形右边）用整组应用*之后*的树，查该
+      边 y 区间内覆盖度为 0 的长度；同向重叠边先取并集，几何重复框只形成
+      一条边界。
+
+    因此共边（外侧被邻框覆盖）、覆盖 2→1 的内部接缝（外侧仍有框）计 0；
+    同横坐标上进入/离开混合交接（部分重叠、完全相接、不相交）也按真实
+    并集裁决——内部公共边不计，未被覆盖的交接边不丢失；仅角点接触时
+    两侧外侧皆空，两条边各自计入。
     """
     events: list[tuple[int, int, int, int]] = []
     ys_set: set[int] = set()
@@ -208,7 +255,15 @@ def _sweep(rects: list[Rect]) -> tuple[int, int]:
             area += tree.covered_length * width
             perimeter += 2 * tree.covered_pieces * width
 
-        perimeter += tree.apply_batch(group.changes)
+        # 进入边：外侧是组前（左侧）半平面。
+        for lo, hi in _merge_intervals(list(group.entering)):
+            perimeter += tree.uncovered_length(lo, hi)
+
+        tree.apply_batch(group.changes)
+
+        # 离开边：外侧是组后（右侧）半平面。
+        for lo, hi in _merge_intervals(list(group.leaving)):
+            perimeter += tree.uncovered_length(lo, hi)
 
         prev_x = x
     return area, perimeter

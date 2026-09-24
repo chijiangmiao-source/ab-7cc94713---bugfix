@@ -5,6 +5,9 @@
 2. 构建检查（compileall）；
 3. 等待审计服务健康（请求校验器与扫描引擎均就绪）；
 4. API/HTTP 冒烟：
+   - 高密度请求：两簇各 8 个几何重复框在同一竖线部分交接，
+     面积 200、周长 70（公共段内化、上下外露竖边保留）；
+   - 同一横坐标完全相接（周长 60）与不相交交接（面积 100、周长 60）；
    - 重叠框：面积 10、周长 14；
    - 相邻方框：不计公共边（面积 12、周长 14）；
    - 几何重复框：不增量（面积 6、周长 10）；
@@ -98,51 +101,89 @@ def _post(records):
         return exc.code, json.loads(exc.read().decode("utf-8"))
 
 
+def _check(label, records, want, ok):
+    status, payload = _post(records)
+    if status == 200 and payload == want:
+        _ok(label, f"{payload} == {want}")
+    else:
+        _fail(label, f"status={status} payload={payload} want={want}")
+        return False
+    return ok
+
+
 def run_http_smoke() -> bool:
     print("== 4/4 API/HTTP 冒烟 ==", flush=True)
     ok = True
 
+    # 高密度请求：两簇各 8 个几何重复框，在 x=10 仅部分共边。
+    dense = [
+        {"id": f"a{k}", "x1": 0, "y1": 0, "x2": 10, "y2": 10}
+        for k in range(8)
+    ] + [
+        {"id": f"b{k}", "x1": 10, "y1": 5, "x2": 20, "y2": 15}
+        for k in range(8)
+    ]
+    ok = _check(
+        "高密度重复框部分交接 面积200/周长70",
+        dense,
+        {"area": "200", "perimeter": "70"},
+        ok,
+    )
+
+    # 同一横坐标完全相接：公共边整条内化。
+    ok = _check(
+        "同横坐标完全相接 面积200/周长60",
+        [
+            {"id": "L", "x1": 0, "y1": 0, "x2": 10, "y2": 10},
+            {"id": "R", "x1": 10, "y1": 0, "x2": 20, "y2": 10},
+        ],
+        {"area": "200", "perimeter": "60"},
+        ok,
+    )
+
+    # 同一横坐标不相交交接：两块独立，外露边一条不丢。
+    ok = _check(
+        "同横坐标不相交交接 面积100/周长60",
+        [
+            {"id": "L", "x1": 0, "y1": 0, "x2": 10, "y2": 5},
+            {"id": "R", "x1": 10, "y1": 10, "x2": 20, "y2": 15},
+        ],
+        {"area": "100", "perimeter": "60"},
+        ok,
+    )
+
     # 验收构型：重叠框面积 10、周长 14。
-    status, payload = _post(
+    ok = _check(
+        "重叠框 面积10/周长14",
         [
             {"id": "a", "x1": 0, "y1": 0, "x2": 3, "y2": 2},
             {"id": "b", "x1": 1, "y1": 1, "x2": 4, "y2": 3},
-        ]
+        ],
+        {"area": "10", "perimeter": "14"},
+        ok,
     )
-    want = {"area": "10", "perimeter": "14"}
-    if status == 200 and payload == want:
-        _ok("重叠框", f"{payload} == {want}")
-    else:
-        _fail("重叠框 面积10/周长14", f"status={status} payload={payload}")
-        ok = False
 
     # 相邻方框：公共边不计（两框各周长 10，共边 3 抹掉两边 -> 14）。
-    status, payload = _post(
+    ok = _check(
+        "相邻方框不计公共边 面积12/周长14",
         [
             {"id": "a", "x1": 0, "y1": 0, "x2": 2, "y2": 3},
             {"id": "b", "x1": 2, "y1": 0, "x2": 4, "y2": 3},
-        ]
+        ],
+        {"area": "12", "perimeter": "14"},
+        ok,
     )
-    want = {"area": "12", "perimeter": "14"}
-    if status == 200 and payload == want:
-        _ok("相邻方框不计公共边", f"{payload} == {want}")
-    else:
-        _fail("相邻方框", f"status={status} payload={payload}")
-        ok = False
 
     # 几何重复框：不增量。
-    status, payload = _post(
+    ok = _check(
+        "重复框不增量 面积6/周长10",
         [
             {"id": "a", "x1": 0, "y1": 0, "x2": 2, "y2": 3},
             {"id": "b", "x1": 0, "y1": 0, "x2": 2, "y2": 3},
-        ]
+        ],
+        {"area": "6", "perimeter": "10"},
+        ok,
     )
-    want = {"area": "6", "perimeter": "10"}
-    if status == 200 and payload == want:
-        _ok("重复框不增量", f"{payload} == {want}")
-    else:
-        _fail("重复框", f"status={status} payload={payload}")
-        ok = False
 
     # 标识重复：400、带位置、无部分结果。
     status, payload = _post(
